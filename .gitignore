@@ -16,3 +16,7 @@ pnpm-debug.log*
 *.tsbuildinfo
 .idea/
 .vscode/
+
+# 测试脚本临时产物
+scripts/.smoke.*
+scripts/.render.*
