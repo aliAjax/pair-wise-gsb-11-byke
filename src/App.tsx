@@ -1,282 +1,155 @@
-import { FormEvent, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
+import { AREAS } from "./data/people";
+import { useSchedule, shiftIssues } from "./state/useSchedule";
+import { sortShifts } from "./domain/rules";
+import { ShiftForm } from "./components/ShiftForm";
+import { PeoplePanel } from "./components/PeoplePanel";
+import { TodoPanel } from "./components/TodoPanel";
+import { ShiftCardView } from "./components/ShiftCard";
 
-type Field = {
-  key: string;
-  label: string;
-  type?: "number" | "date" | "select";
-  options?: string[];
-};
-
-type RecordItem = {
-  id: string;
-  status: string;
-  notes: string;
-  createdAt: string;
-  [key: string]: string | number;
-};
-
-const project = {
-  "number": 10,
-  "folder": "dfwl/frontend/dfwlfront-10",
-  "framework": "react",
-  "title": "油站设备巡检清单",
-  "subtitle": "创建巡检项、标记异常，并统计今日巡检状态。",
-  "industry": "石油",
-  "stack": [
-    "React",
-    "Vite",
-    "TypeScript",
-    "Zustand",
-    "Ant Design"
-  ],
-  "storageKey": "dfwlfront-10-inspection",
-  "formTitle": "新增巡检项",
-  "primaryAction": "加入清单",
-  "entityLabel": "巡检项",
-  "statuses": [
-    "未检",
-    "正常",
-    "异常"
-  ],
-  "filters": [
-    "全部区域",
-    "加油区",
-    "油罐区",
-    "收银区"
-  ],
-  "fields": [
-    {
-      "key": "item",
-      "label": "巡检项"
-    },
-    {
-      "key": "area",
-      "label": "区域",
-      "type": "select",
-      "options": [
-        "加油区",
-        "油罐区",
-        "收银区"
-      ]
-    },
-    {
-      "key": "inspector",
-      "label": "巡检人"
-    },
-    {
-      "key": "checkedAt",
-      "label": "巡检日期",
-      "type": "date"
-    }
-  ],
-  "records": [
-    {
-      "item": "加油机1号",
-      "area": "加油区",
-      "inspector": "何鑫",
-      "checkedAt": "2026-06-30",
-      "status": "正常",
-      "notes": "无异常"
-    },
-    {
-      "item": "卸油口密封",
-      "area": "油罐区",
-      "inspector": "何鑫",
-      "checkedAt": "2026-06-30",
-      "status": "异常",
-      "notes": "密封圈老化"
-    }
-  ],
-  "metricLabels": [
-    "巡检项",
-    "异常",
-    "已检"
-  ]
-} as const;
-
-const fields = project.fields as unknown as Field[];
-const statuses: string[] = [...project.statuses];
-
-function createBlank() {
-  return Object.fromEntries(fields.map((field) => [field.key, field.type === "number" ? 0 : ""]));
-}
-
-function loadRecords(): RecordItem[] {
-  const raw = localStorage.getItem(project.storageKey);
-  if (!raw) {
-    return project.records.map((record, index) => ({
-      ...record,
-      id: `seed-${index + 1}`,
-      createdAt: new Date(Date.now() - index * 86400000).toISOString()
-    })) as RecordItem[];
-  }
-  try {
-    return JSON.parse(raw) as RecordItem[];
-  } catch {
-    return [];
-  }
-}
-
-function saveRecords(records: RecordItem[]) {
-  localStorage.setItem(project.storageKey, JSON.stringify(records));
-}
-
-function nextStatus(status: string) {
-  const index = statuses.indexOf(status);
-  return statuses[(index + 1) % statuses.length];
-}
-
-function primaryText(record: RecordItem) {
-  const first = fields[0];
-  const second = fields[1];
-  return [record[first.key], record[second.key]].filter(Boolean).join(" / ") || project.entityLabel;
-}
+type AreaFilter = "全部区域" | (typeof AREAS)[number];
+type StatusFilter = "全部状态" | "编制中" | "进行中" | "已结班";
 
 export default function App() {
-  const [records, setRecords] = useState<RecordItem[]>(loadRecords);
-  const [form, setForm] = useState<Record<string, string | number>>(createBlank);
-  const [note, setNote] = useState("");
-  const [filter, setFilter] = useState<string>(project.filters[0]);
-
-  const filteredRecords = useMemo(() => {
-    if (filter.startsWith("全部")) return records;
-    return records.filter((record) => Object.values(record).includes(filter));
-  }, [filter, records]);
+  const { state, actions, error } = useSchedule();
+  const [areaFilter, setAreaFilter] = useState<AreaFilter>("全部区域");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("全部状态");
 
   const metrics = useMemo(() => {
-    const total = records.length;
-    const second = records.filter((record) => record.status === statuses[1]).length;
-    const third = records.filter((record) => record.status === statuses[2]).length;
-    const numberValues = records.flatMap((record) =>
-      fields.filter((field) => field.type === "number").map((field) => Number(record[field.key] || 0))
+    const total = state.shifts.length;
+    const invalid = state.shifts.filter(
+      (s) => shiftIssues(state, s).length > 0
+    ).length;
+    const pendingTodos = state.todos.filter((t) => t.status === "pending").length;
+    const pendingHandovers = state.shifts.reduce(
+      (n, s) => n + s.handovers.filter((h) => h.status === "taken").length,
+      0
     );
-    const sum = numberValues.reduce((acc, value) => acc + value, 0);
-    return [total, second || sum, third || Math.round(sum / Math.max(total, 1))];
-  }, [records]);
+    return [
+      { label: "班次总数", value: total },
+      { label: "不成立班次", value: invalid },
+      { label: "漏检待办", value: pendingTodos },
+      { label: "待确认交接", value: pendingHandovers },
+    ];
+  }, [state]);
 
-  const chartRows = statuses.map((status) => ({
-    status,
-    value: records.filter((record) => record.status === status).length
-  }));
-  const maxChart = Math.max(1, ...chartRows.map((row) => row.value));
+  const visibleShifts = useMemo(() => {
+    const statusMap = { 编制中: "draft", 进行中: "active", 已结班: "closed" } as const;
+    return sortShifts(state.shifts)
+      .filter((s) => areaFilter === "全部区域" || s.area === areaFilter)
+      .filter((s) => statusFilter === "全部状态" || s.status === statusMap[statusFilter]);
+  }, [state, areaFilter, statusFilter]);
 
-  function updateRecords(next: RecordItem[]) {
-    setRecords(next);
-    saveRecords(next);
-  }
-
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const next: RecordItem = {
-      ...form,
-      id: crypto.randomUUID(),
-      status: statuses[0],
-      notes: note || "暂无备注",
-      createdAt: new Date().toISOString()
-    } as RecordItem;
-    updateRecords([next, ...records]);
-    setForm(createBlank());
-    setNote("");
-  }
+  const validityCounts = useMemo(() => {
+    const rows = ["编制中", "进行中", "已结班", "不成立"].map((label) => {
+      const map = { 编制中: "draft", 进行中: "active", 已结班: "closed" } as const;
+      const list =
+        label === "不成立"
+          ? state.shifts.filter((s) => shiftIssues(state, s).length > 0)
+          : state.shifts.filter((s) => s.status === map[label as keyof typeof map]);
+      return { label, value: list.length };
+    });
+    return rows;
+  }, [state]);
+  const maxCount = Math.max(1, ...validityCounts.map((r) => r.value));
 
   return (
     <main className="app">
       <div className="shell">
         <header className="topbar">
           <div>
-            <p className="eyebrow">{project.industry}行业前端最小闭环</p>
-            <h1>{project.title}</h1>
-            <p className="subtitle">{project.subtitle}</p>
+            <p className="eyebrow">石油行业 · 班次编制与替班交接台</p>
+            <h1>油站班次编排与交接</h1>
+            <p className="subtitle">
+              每班登记区域、时刻、值班人、资格与必到点；人员时段重叠或资格过期则整班不成立。
+              缺岗仅允许同区域且本班空闲的合格人员替班，原值班人确认交接前责任不释放；
+              接班后冻结名单与点位，漏检转下班待办，结班后调整须写原因并另建版本。
+            </p>
           </div>
-          <div className="stack">{project.stack.map((item) => <span className="tag" key={item}>{item}</span>)}</div>
+          <div className="stack">
+            <span className="tag">React</span>
+            <span className="tag">TypeScript</span>
+            <span className="tag">localStorage 原子存储</span>
+            <span className="tag">资料 / 判定 / 存储 / 页面分离</span>
+          </div>
         </header>
 
         <section className="metrics">
-          {project.metricLabels.map((label, index) => (
-            <article className="metric" key={label}>
-              <span>{label}</span>
-              <strong>{metrics[index]}</strong>
+          {metrics.map((metric) => (
+            <article className="metric" key={metric.label}>
+              <span>{metric.label}</span>
+              <strong>{metric.value}</strong>
             </article>
           ))}
         </section>
 
-        <section className="workspace">
-          <form className="panel" onSubmit={handleSubmit}>
-            <h2>{project.formTitle}</h2>
-            <div className="form-grid">
-              {fields.map((field) => (
-                <label key={field.key}>
-                  {field.label}
-                  {field.type === "select" ? (
-                    <select
-                      value={String(form[field.key])}
-                      onChange={(event) => setForm({ ...form, [field.key]: event.target.value })}
-                      required
-                    >
-                      <option value="">请选择</option>
-                      {field.options?.map((option) => <option key={option}>{option}</option>)}
-                    </select>
-                  ) : (
-                    <input
-                      type={field.type || "text"}
-                      value={form[field.key]}
-                      onChange={(event) =>
-                        setForm({ ...form, [field.key]: field.type === "number" ? Number(event.target.value) : event.target.value })
-                      }
-                      required
-                    />
-                  )}
-                </label>
-              ))}
-              <label>
-                备注
-                <textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="填写处理说明或现场备注" />
-              </label>
-              <button type="submit">{project.primaryAction}</button>
-            </div>
-          </form>
+        {error && (
+          <div className="error-banner" role="alert">
+            <span>{error}</span>
+            <button type="button" className="secondary tiny" onClick={actions.clearError}>
+              知道了
+            </button>
+          </div>
+        )}
+
+        <section className="workspace workspace-wide">
+          <div className="side-col">
+            <ShiftForm actions={actions} />
+            <TodoPanel state={state} actions={actions} />
+            <PeoplePanel />
+          </div>
 
           <section className="list-panel">
             <div className="toolbar">
-              <h2>{project.entityLabel}列表</h2>
-              <select value={filter} onChange={(event) => setFilter(event.target.value)}>
-                {project.filters.map((item) => <option key={item}>{item}</option>)}
-              </select>
+              <h2>班次列表</h2>
+              <div className="filters">
+                <select
+                  value={areaFilter}
+                  onChange={(e) => setAreaFilter(e.target.value as AreaFilter)}
+                >
+                  {["全部区域", ...AREAS].map((a) => (
+                    <option key={a}>{a}</option>
+                  ))}
+                </select>
+                <select
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+                >
+                  {(["全部状态", "编制中", "进行中", "已结班"] as StatusFilter[]).map((s) => (
+                    <option key={s}>{s}</option>
+                  ))}
+                </select>
+                <button type="button" className="secondary" onClick={actions.reset}>
+                  恢复演示数据
+                </button>
+              </div>
             </div>
 
             <div className="record-grid">
-              {filteredRecords.length === 0 ? <div className="empty">暂无匹配数据</div> : filteredRecords.map((record) => (
-                <article className="record" key={record.id}>
-                  <div className="record-head">
-                    <p className="record-title">{primaryText(record)}</p>
-                    <span className="status">{record.status}</span>
-                  </div>
-                  <div className="details">
-                    {fields.map((field) => (
-                      <span key={field.key}>{field.label}: {record[field.key]}</span>
-                    ))}
-                  </div>
-                  <p className="note">{record.notes}</p>
-                  <div className="actions">
-                    <button type="button" onClick={() => updateRecords(records.map((item) => item.id === record.id ? { ...item, status: nextStatus(item.status) } : item))}>
-                      流转状态
-                    </button>
-                    <button className="secondary" type="button" onClick={() => navigator.clipboard?.writeText(primaryText(record))}>
-                      复制摘要
-                    </button>
-                    <button className="danger" type="button" onClick={() => updateRecords(records.filter((item) => item.id !== record.id))}>
-                      删除
-                    </button>
-                  </div>
-                </article>
-              ))}
+              {visibleShifts.length === 0 ? (
+                <div className="empty">暂无匹配班次</div>
+              ) : (
+                visibleShifts.map((shift) => (
+                  <ShiftCardView
+                    key={shift.id}
+                    state={state}
+                    shift={shift}
+                    actions={actions}
+                  />
+                ))
+              )}
             </div>
 
             <div className="mini-chart">
-              {chartRows.map((row) => (
-                <div className="bar" key={row.status}>
-                  <span>{row.status}</span>
-                  <div className="bar-track"><div className="bar-fill" style={{ width: `${(row.value / maxChart) * 100}%` }} /></div>
+              {validityCounts.map((row) => (
+                <div className="bar" key={row.label}>
+                  <span>{row.label}</span>
+                  <div className="bar-track">
+                    <div
+                      className={`bar-fill ${row.label === "不成立" ? "bar-fill-warn" : ""}`}
+                      style={{ width: `${(row.value / maxCount) * 100}%` }}
+                    />
+                  </div>
                   <strong>{row.value}</strong>
                 </div>
               ))}
